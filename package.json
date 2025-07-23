@@ -1,0 +1,55 @@
+{
+  "name": "ransomware-live-server",
+  "version": "1.0.0",
+  "description": "MCP server for Ransomware.live API - Real-time ransomware victim monitoring",
+  "type": "module",
+  "main": "build/index.js",
+  "bin": {
+    "ransomware-live-server": "build/index.js"
+  },
+  "scripts": {
+    "build": "tsc && node -e \"require('fs').chmodSync('build/index.js', '755')\"",
+    "dev": "tsx src/index.ts",
+    "start": "node build/index.js",
+    "test": "node simple-test.cjs",
+    "test:all": "node test-all-tools.cjs",
+    "test:final": "node final-test-for-readme.cjs",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ransomware",
+    "cybersecurity",
+    "threat-intelligence",
+    "security",
+    "claude",
+    "ai",
+    "api",
+    "threat-hunting",
+    "incident-response",
+    "cert"
+  ],
+  "author": "MCP Developer",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/your-username/ransomware-live-server.git"
+  },
+  "bugs": {
+    "url": "https://github.com/your-username/ransomware-live-server/issues"
+  },
+  "homepage": "https://github.com/your-username/ransomware-live-server#readme",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^0.4.0",
+    "axios": "^1.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
