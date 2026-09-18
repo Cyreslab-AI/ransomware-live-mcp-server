@@ -41,15 +41,15 @@
   },
   "homepage": "https://github.com/your-username/ransomware-live-server#readme",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^0.4.0",
-    "axios": "^1.6.0"
+    "@modelcontextprotocol/server": "^2.0.0",
+    "axios": "^1.20.0"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
-    "tsx": "^4.0.0",
-    "typescript": "^5.0.0"
+    "@types/node": "^24.13.5",
+    "tsx": "^4.23.13",
+    "typescript": "^5.9.3"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   }
 }
