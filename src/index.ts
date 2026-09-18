@@ -7,8 +7,17 @@ import {
 } from "@modelcontextprotocol/server";
 import axios from "axios";
 
-// Base URL for Ransomware.live API v2
+// Base URL for Ransomware.live API v2 (free tier, no authentication required)
 const BASE_URL = "https://api.ransomware.live/v2";
+
+// Base URL for Ransomware.live API PRO (requires an X-API-KEY header).
+// Confirmed against the live OpenAPI/Swagger definition served at
+// https://api-pro.ransomware.live/swagger.json (fetched 2026-09-19): auth is
+// via the `X-API-KEY` header, and negotiation chats / ransom notes / IoCs /
+// MITRE ATT&CK mapping are exposed under /negotiations, /ransomnotes,
+// /iocs and /groups/{group} respectively. Free API keys are available at
+// https://www.ransomware.live/my.
+const PRO_BASE_URL = "https://api-pro.ransomware.live";
 
 // Interface definitions based on API documentation
 interface RansomwareVictim {
@@ -141,6 +150,38 @@ const YARA_RULES_OUTPUT_SCHEMA = {
     "Raw YARA rule data for the ransomware group, as returned by the Ransomware.live API. The exact shape varies by group.",
 };
 
+// --- Pro-tier (api-pro.ransomware.live) output schemas ---
+//
+// The Pro API's published OpenAPI spec documents these endpoints with prose
+// descriptions of the response fields but no formal JSON Schema, so (as with
+// YARA_RULES_OUTPUT_SCHEMA above) these are intentionally loose rather than
+// inventing a shape the upstream API doesn't formally guarantee. Each tool
+// is tiered: calling it with fewer arguments returns a discovery-level list,
+// calling it with more arguments drills into the actual content.
+const NEGOTIATION_CHAT_OUTPUT_SCHEMA = {
+  type: "object",
+  description:
+    "Negotiation chat data from the Ransomware.live Pro API. With no arguments: groups that have leaked negotiation chats, with a chat count per group. With `group` only: chat metadata for that group (id, message_count, initialransom, negotiatedransom, paid). With `group` and `chatId`: the full message thread for that specific chat.",
+};
+
+const RANSOM_NOTE_OUTPUT_SCHEMA = {
+  type: "object",
+  description:
+    "Ransom note data from the Ransomware.live Pro API. With no arguments: groups that have ransom notes on file, with a note count per group. With `group` only: the list of note identifiers for that group. With `group` and `noteName`: the full note text plus its file extension (.txt/.html/.md).",
+};
+
+const IOC_OUTPUT_SCHEMA = {
+  type: "object",
+  description:
+    "Indicator-of-Compromise (IoC) data from the Ransomware.live Pro API. With no `group`: all groups that have IoCs, with a count per IoC type (md5, sha256, ip, domain, email, btc, url, ...). With `group`: the actual indicator values for that group, organized by type. `type` optionally filters to a single IoC type in both cases.",
+};
+
+const MITRE_TTPS_OUTPUT_SCHEMA = {
+  type: "object",
+  description:
+    "Comprehensive Pro-tier intelligence profile for a ransomware group, as returned by GET /groups/{group} on the Pro API. Includes `ttps` (MITRE ATT&CK tactics and techniques), `vulnerabilities` (CVEs exploited, with CVSS scores), `tools` (malware/tooling used), plus group background, activity dates, leak-site locations, and negotiation/ransom-note availability flags.",
+};
+
 // Read-only, external-API-lookup annotations shared by every tool in this server.
 const READ_ONLY_ANNOTATIONS = { readOnlyHint: true, openWorldHint: true };
 
@@ -165,6 +206,10 @@ const TOOL_OUTPUT_SCHEMAS: Record<string, Record<string, unknown>> = {
   get_sector_victims: { type: "array", items: VICTIM_OUTPUT_SCHEMA },
   get_cert_contacts: CERT_CONTACT_OUTPUT_SCHEMA,
   get_yara_rules: YARA_RULES_OUTPUT_SCHEMA,
+  get_negotiation_chat: NEGOTIATION_CHAT_OUTPUT_SCHEMA,
+  get_ransom_note: RANSOM_NOTE_OUTPUT_SCHEMA,
+  get_iocs: IOC_OUTPUT_SCHEMA,
+  get_mitre_ttps: MITRE_TTPS_OUTPUT_SCHEMA,
 };
 
 // Validation functions for tool arguments
@@ -211,9 +256,44 @@ const isValidLimitArgs = (args: any): args is { limit?: number } =>
   (args.limit === undefined ||
     (typeof args.limit === "number" && args.limit > 0 && args.limit <= 1000));
 
+// --- Pro-tier argument validators ---
+
+const isValidNegotiationChatArgs = (
+  args: any,
+): args is { group?: string; chatId?: string } =>
+  typeof args === "object" &&
+  args !== null &&
+  (args.group === undefined || typeof args.group === "string") &&
+  (args.chatId === undefined || typeof args.chatId === "string") &&
+  // A chatId only makes sense scoped to a group.
+  (args.chatId === undefined || typeof args.group === "string");
+
+const isValidRansomNoteArgs = (
+  args: any,
+): args is { group?: string; noteName?: string } =>
+  typeof args === "object" &&
+  args !== null &&
+  (args.group === undefined || typeof args.group === "string") &&
+  (args.noteName === undefined || typeof args.noteName === "string") &&
+  (args.noteName === undefined || typeof args.group === "string");
+
+const isValidIocsArgs = (
+  args: any,
+): args is { group?: string; type?: string } =>
+  typeof args === "object" &&
+  args !== null &&
+  (args.group === undefined || typeof args.group === "string") &&
+  (args.type === undefined || typeof args.type === "string");
+
+const isValidMitreTtpsArgs = (args: any): args is { group: string } =>
+  typeof args === "object" && args !== null && typeof args.group === "string";
+
 class RansomwareLiveServer {
   private server: Server;
   private axiosInstance;
+  // Lazily created, since the Pro API key is optional: most installs will
+  // never touch this and shouldn't pay for an unused axios instance.
+  private proAxiosInstance: ReturnType<typeof axios.create> | null = null;
 
   constructor() {
     this.server = new Server(
@@ -248,6 +328,35 @@ class RansomwareLiveServer {
       await this.server.close();
       process.exit(0);
     });
+  }
+
+  // Returns the Pro-tier axios client, creating it on first use. Throws a
+  // clear ProtocolError (rather than silently degrading to fake data) when
+  // RANSOMWARE_LIVE_API_KEY isn't configured, since Pro tools have no
+  // free-tier fallback.
+  private getProAxios(): ReturnType<typeof axios.create> {
+    if (!this.proAxiosInstance) {
+      const apiKey = process.env.RANSOMWARE_LIVE_API_KEY;
+      if (!apiKey) {
+        throw new ProtocolError(
+          ProtocolErrorCode.InvalidRequest,
+          "This tool requires Ransomware.live Pro tier access. Set the RANSOMWARE_LIVE_API_KEY environment variable (get a free key at https://www.ransomware.live/my) and restart the server.",
+        );
+      }
+
+      this.proAxiosInstance = axios.create({
+        baseURL: PRO_BASE_URL,
+        timeout: 120000,
+        headers: {
+          "User-Agent": "MCP-RansomwareLive-Server/1.0.0",
+          "X-API-KEY": apiKey,
+        },
+        maxContentLength: 50 * 1024 * 1024,
+        maxBodyLength: 50 * 1024 * 1024,
+      });
+    }
+
+    return this.proAxiosInstance;
   }
 
   private setupResourceHandlers() {
@@ -570,6 +679,90 @@ class RansomwareLiveServer {
           outputSchema: YARA_RULES_OUTPUT_SCHEMA,
           annotations: READ_ONLY_ANNOTATIONS,
         },
+        {
+          name: "get_negotiation_chat",
+          description:
+            "[Pro tier, requires RANSOMWARE_LIVE_API_KEY] Get leaked ransomware negotiation chat logs (ransom demands, counteroffers, payment outcomes). Call with no arguments to discover which groups have chats available; add `group` to list that group's chats; add `chatId` (from that list) to read the full message thread.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              group: {
+                type: "string",
+                description:
+                  "Ransomware group name (e.g. lockbit3, blackcat). Omit to list all groups that have negotiation chats.",
+              },
+              chatId: {
+                type: "string",
+                description:
+                  "Chat ID returned by calling this tool with just `group` set. Requires `group` to also be set.",
+              },
+            },
+          },
+          outputSchema: NEGOTIATION_CHAT_OUTPUT_SCHEMA,
+          annotations: READ_ONLY_ANNOTATIONS,
+        },
+        {
+          name: "get_ransom_note",
+          description:
+            "[Pro tier, requires RANSOMWARE_LIVE_API_KEY] Get ransom note text left by ransomware groups. Call with no arguments to discover which groups have notes on file; add `group` to list that group's note identifiers; add `noteName` (from that list) to read the full note text.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              group: {
+                type: "string",
+                description:
+                  "Ransomware group name (e.g. lockbit3, clop). Omit to list all groups that have ransom notes.",
+              },
+              noteName: {
+                type: "string",
+                description:
+                  "Note identifier returned by calling this tool with just `group` set. Requires `group` to also be set.",
+              },
+            },
+          },
+          outputSchema: RANSOM_NOTE_OUTPUT_SCHEMA,
+          annotations: READ_ONLY_ANNOTATIONS,
+        },
+        {
+          name: "get_iocs",
+          description:
+            "[Pro tier, requires RANSOMWARE_LIVE_API_KEY] Get Indicators of Compromise (file hashes, IPs, domains, emails, BTC addresses, URLs) for ransomware groups. Call with no `group` to see which groups have IoCs and of what types; add `group` to get that group's actual indicator values. Optionally filter to one IoC type with `type`.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              group: {
+                type: "string",
+                description:
+                  "Ransomware group name (e.g. lockbit3, blackcat). Omit to list all groups that have IoCs.",
+              },
+              type: {
+                type: "string",
+                description:
+                  "Optional IoC type filter, e.g. md5, sha256, ip, domain, email, btc, url.",
+              },
+            },
+          },
+          outputSchema: IOC_OUTPUT_SCHEMA,
+          annotations: READ_ONLY_ANNOTATIONS,
+        },
+        {
+          name: "get_mitre_ttps",
+          description:
+            "[Pro tier, requires RANSOMWARE_LIVE_API_KEY] Get a ransomware group's MITRE ATT&CK tactics/techniques (TTPs), exploited CVEs (with CVSS scores), and tooling, as part of its comprehensive Pro-tier intelligence profile.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              group: {
+                type: "string",
+                description:
+                  "Name of the ransomware group (e.g. lockbit3, blackcat, clop)",
+              },
+            },
+            required: ["group"],
+          },
+          outputSchema: MITRE_TTPS_OUTPUT_SCHEMA,
+          annotations: READ_ONLY_ANNOTATIONS,
+        },
       ],
     }));
 
@@ -730,6 +923,57 @@ class RansomwareLiveServer {
                 );
               }
               result = await this.getYaraRules(request.params.arguments.group);
+              break;
+
+            case "get_negotiation_chat":
+              if (!isValidNegotiationChatArgs(request.params.arguments)) {
+                throw new ProtocolError(
+                  ProtocolErrorCode.InvalidParams,
+                  "Invalid arguments for get_negotiation_chat: chatId requires group to also be set",
+                );
+              }
+              result = await this.getNegotiationChat(
+                request.params.arguments.group,
+                request.params.arguments.chatId,
+              );
+              break;
+
+            case "get_ransom_note":
+              if (!isValidRansomNoteArgs(request.params.arguments)) {
+                throw new ProtocolError(
+                  ProtocolErrorCode.InvalidParams,
+                  "Invalid arguments for get_ransom_note: noteName requires group to also be set",
+                );
+              }
+              result = await this.getRansomNote(
+                request.params.arguments.group,
+                request.params.arguments.noteName,
+              );
+              break;
+
+            case "get_iocs":
+              if (!isValidIocsArgs(request.params.arguments)) {
+                throw new ProtocolError(
+                  ProtocolErrorCode.InvalidParams,
+                  "Invalid arguments for get_iocs",
+                );
+              }
+              result = await this.getIocs(
+                request.params.arguments.group,
+                request.params.arguments.type,
+              );
+              break;
+
+            case "get_mitre_ttps":
+              if (!isValidMitreTtpsArgs(request.params.arguments)) {
+                throw new ProtocolError(
+                  ProtocolErrorCode.InvalidParams,
+                  "Invalid group name for get_mitre_ttps",
+                );
+              }
+              result = await this.getMitreTtps(
+                request.params.arguments.group,
+              );
               break;
 
             default:
@@ -993,6 +1237,92 @@ class RansomwareLiveServer {
   private async getYaraRules(group: string) {
     const response = await this.axiosInstance.get(
       `/yara/${encodeURIComponent(group)}`,
+    );
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(response.data, null, 2),
+        },
+      ],
+      structuredContent: response.data,
+    };
+  }
+
+  // --- Pro-tier tool implementations ---
+  // Each of these calls getProAxios(), which throws a clear ProtocolError
+  // if RANSOMWARE_LIVE_API_KEY isn't configured, before making any request.
+
+  private async getNegotiationChat(group?: string, chatId?: string) {
+    const proAxios = this.getProAxios();
+
+    let endpoint = "/negotiations";
+    if (group && chatId) {
+      endpoint = `/negotiations/${encodeURIComponent(group)}/${encodeURIComponent(chatId)}`;
+    } else if (group) {
+      endpoint = `/negotiations/${encodeURIComponent(group)}`;
+    }
+
+    const response = await proAxios.get(endpoint);
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(response.data, null, 2),
+        },
+      ],
+      structuredContent: response.data,
+    };
+  }
+
+  private async getRansomNote(group?: string, noteName?: string) {
+    const proAxios = this.getProAxios();
+
+    let endpoint = "/ransomnotes";
+    if (group && noteName) {
+      endpoint = `/ransomnotes/${encodeURIComponent(group)}/${encodeURIComponent(noteName)}`;
+    } else if (group) {
+      endpoint = `/ransomnotes/${encodeURIComponent(group)}`;
+    }
+
+    const response = await proAxios.get(endpoint);
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(response.data, null, 2),
+        },
+      ],
+      structuredContent: response.data,
+    };
+  }
+
+  private async getIocs(group?: string, type?: string) {
+    const proAxios = this.getProAxios();
+
+    const endpoint = group ? `/iocs/${encodeURIComponent(group)}` : "/iocs";
+    const response = await proAxios.get(endpoint, {
+      params: type ? { type } : undefined,
+    });
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(response.data, null, 2),
+        },
+      ],
+      structuredContent: response.data,
+    };
+  }
+
+  private async getMitreTtps(group: string) {
+    const proAxios = this.getProAxios();
+
+    // The MITRE ATT&CK mapping (`ttps`) is part of the Pro API's
+    // comprehensive group profile, not a standalone endpoint — the Pro
+    // OpenAPI spec doesn't expose TTPs any other way.
+    const response = await proAxios.get(
+      `/groups/${encodeURIComponent(group)}`,
     );
     return {
       content: [

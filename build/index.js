@@ -3,6 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { Server, ProtocolError, ProtocolErrorCode, } from "@modelcontextprotocol/server";
 import axios from "axios";
 const BASE_URL = "https://api.ransomware.live/v2";
+const PRO_BASE_URL = "https://api-pro.ransomware.live";
 const VICTIM_OUTPUT_SCHEMA = {
     type: "object",
     properties: {
@@ -71,6 +72,22 @@ const API_INFO_OUTPUT_SCHEMA = {
 const YARA_RULES_OUTPUT_SCHEMA = {
     description: "Raw YARA rule data for the ransomware group, as returned by the Ransomware.live API. The exact shape varies by group.",
 };
+const NEGOTIATION_CHAT_OUTPUT_SCHEMA = {
+    type: "object",
+    description: "Negotiation chat data from the Ransomware.live Pro API. With no arguments: groups that have leaked negotiation chats, with a chat count per group. With `group` only: chat metadata for that group (id, message_count, initialransom, negotiatedransom, paid). With `group` and `chatId`: the full message thread for that specific chat.",
+};
+const RANSOM_NOTE_OUTPUT_SCHEMA = {
+    type: "object",
+    description: "Ransom note data from the Ransomware.live Pro API. With no arguments: groups that have ransom notes on file, with a note count per group. With `group` only: the list of note identifiers for that group. With `group` and `noteName`: the full note text plus its file extension (.txt/.html/.md).",
+};
+const IOC_OUTPUT_SCHEMA = {
+    type: "object",
+    description: "Indicator-of-Compromise (IoC) data from the Ransomware.live Pro API. With no `group`: all groups that have IoCs, with a count per IoC type (md5, sha256, ip, domain, email, btc, url, ...). With `group`: the actual indicator values for that group, organized by type. `type` optionally filters to a single IoC type in both cases.",
+};
+const MITRE_TTPS_OUTPUT_SCHEMA = {
+    type: "object",
+    description: "Comprehensive Pro-tier intelligence profile for a ransomware group, as returned by GET /groups/{group} on the Pro API. Includes `ttps` (MITRE ATT&CK tactics and techniques), `vulnerabilities` (CVEs exploited, with CVSS scores), `tools` (malware/tooling used), plus group background, activity dates, leak-site locations, and negotiation/ransom-note availability flags.",
+};
 const READ_ONLY_ANNOTATIONS = { readOnlyHint: true, openWorldHint: true };
 const TOOL_OUTPUT_SCHEMAS = {
     get_api_info: API_INFO_OUTPUT_SCHEMA,
@@ -87,6 +104,10 @@ const TOOL_OUTPUT_SCHEMAS = {
     get_sector_victims: { type: "array", items: VICTIM_OUTPUT_SCHEMA },
     get_cert_contacts: CERT_CONTACT_OUTPUT_SCHEMA,
     get_yara_rules: YARA_RULES_OUTPUT_SCHEMA,
+    get_negotiation_chat: NEGOTIATION_CHAT_OUTPUT_SCHEMA,
+    get_ransom_note: RANSOM_NOTE_OUTPUT_SCHEMA,
+    get_iocs: IOC_OUTPUT_SCHEMA,
+    get_mitre_ttps: MITRE_TTPS_OUTPUT_SCHEMA,
 };
 const isValidGroupArgs = (args) => typeof args === "object" && args !== null && typeof args.group === "string";
 const isValidSearchArgs = (args) => typeof args === "object" &&
@@ -115,9 +136,25 @@ const isValidLimitArgs = (args) => typeof args === "object" &&
     args !== null &&
     (args.limit === undefined ||
         (typeof args.limit === "number" && args.limit > 0 && args.limit <= 1000));
+const isValidNegotiationChatArgs = (args) => typeof args === "object" &&
+    args !== null &&
+    (args.group === undefined || typeof args.group === "string") &&
+    (args.chatId === undefined || typeof args.chatId === "string") &&
+    (args.chatId === undefined || typeof args.group === "string");
+const isValidRansomNoteArgs = (args) => typeof args === "object" &&
+    args !== null &&
+    (args.group === undefined || typeof args.group === "string") &&
+    (args.noteName === undefined || typeof args.noteName === "string") &&
+    (args.noteName === undefined || typeof args.group === "string");
+const isValidIocsArgs = (args) => typeof args === "object" &&
+    args !== null &&
+    (args.group === undefined || typeof args.group === "string") &&
+    (args.type === undefined || typeof args.type === "string");
+const isValidMitreTtpsArgs = (args) => typeof args === "object" && args !== null && typeof args.group === "string";
 class RansomwareLiveServer {
     server;
     axiosInstance;
+    proAxiosInstance = null;
     constructor() {
         this.server = new Server({
             name: "ransomware-live-server",
@@ -144,6 +181,25 @@ class RansomwareLiveServer {
             await this.server.close();
             process.exit(0);
         });
+    }
+    getProAxios() {
+        if (!this.proAxiosInstance) {
+            const apiKey = process.env.RANSOMWARE_LIVE_API_KEY;
+            if (!apiKey) {
+                throw new ProtocolError(ProtocolErrorCode.InvalidRequest, "This tool requires Ransomware.live Pro tier access. Set the RANSOMWARE_LIVE_API_KEY environment variable (get a free key at https://www.ransomware.live/my) and restart the server.");
+            }
+            this.proAxiosInstance = axios.create({
+                baseURL: PRO_BASE_URL,
+                timeout: 120000,
+                headers: {
+                    "User-Agent": "MCP-RansomwareLive-Server/1.0.0",
+                    "X-API-KEY": apiKey,
+                },
+                maxContentLength: 50 * 1024 * 1024,
+                maxBodyLength: 50 * 1024 * 1024,
+            });
+        }
+        return this.proAxiosInstance;
     }
     setupResourceHandlers() {
         this.server.setRequestHandler("resources/list", async () => ({
@@ -457,6 +513,79 @@ class RansomwareLiveServer {
                     outputSchema: YARA_RULES_OUTPUT_SCHEMA,
                     annotations: READ_ONLY_ANNOTATIONS,
                 },
+                {
+                    name: "get_negotiation_chat",
+                    description: "[Pro tier, requires RANSOMWARE_LIVE_API_KEY] Get leaked ransomware negotiation chat logs (ransom demands, counteroffers, payment outcomes). Call with no arguments to discover which groups have chats available; add `group` to list that group's chats; add `chatId` (from that list) to read the full message thread.",
+                    inputSchema: {
+                        type: "object",
+                        properties: {
+                            group: {
+                                type: "string",
+                                description: "Ransomware group name (e.g. lockbit3, blackcat). Omit to list all groups that have negotiation chats.",
+                            },
+                            chatId: {
+                                type: "string",
+                                description: "Chat ID returned by calling this tool with just `group` set. Requires `group` to also be set.",
+                            },
+                        },
+                    },
+                    outputSchema: NEGOTIATION_CHAT_OUTPUT_SCHEMA,
+                    annotations: READ_ONLY_ANNOTATIONS,
+                },
+                {
+                    name: "get_ransom_note",
+                    description: "[Pro tier, requires RANSOMWARE_LIVE_API_KEY] Get ransom note text left by ransomware groups. Call with no arguments to discover which groups have notes on file; add `group` to list that group's note identifiers; add `noteName` (from that list) to read the full note text.",
+                    inputSchema: {
+                        type: "object",
+                        properties: {
+                            group: {
+                                type: "string",
+                                description: "Ransomware group name (e.g. lockbit3, clop). Omit to list all groups that have ransom notes.",
+                            },
+                            noteName: {
+                                type: "string",
+                                description: "Note identifier returned by calling this tool with just `group` set. Requires `group` to also be set.",
+                            },
+                        },
+                    },
+                    outputSchema: RANSOM_NOTE_OUTPUT_SCHEMA,
+                    annotations: READ_ONLY_ANNOTATIONS,
+                },
+                {
+                    name: "get_iocs",
+                    description: "[Pro tier, requires RANSOMWARE_LIVE_API_KEY] Get Indicators of Compromise (file hashes, IPs, domains, emails, BTC addresses, URLs) for ransomware groups. Call with no `group` to see which groups have IoCs and of what types; add `group` to get that group's actual indicator values. Optionally filter to one IoC type with `type`.",
+                    inputSchema: {
+                        type: "object",
+                        properties: {
+                            group: {
+                                type: "string",
+                                description: "Ransomware group name (e.g. lockbit3, blackcat). Omit to list all groups that have IoCs.",
+                            },
+                            type: {
+                                type: "string",
+                                description: "Optional IoC type filter, e.g. md5, sha256, ip, domain, email, btc, url.",
+                            },
+                        },
+                    },
+                    outputSchema: IOC_OUTPUT_SCHEMA,
+                    annotations: READ_ONLY_ANNOTATIONS,
+                },
+                {
+                    name: "get_mitre_ttps",
+                    description: "[Pro tier, requires RANSOMWARE_LIVE_API_KEY] Get a ransomware group's MITRE ATT&CK tactics/techniques (TTPs), exploited CVEs (with CVSS scores), and tooling, as part of its comprehensive Pro-tier intelligence profile.",
+                    inputSchema: {
+                        type: "object",
+                        properties: {
+                            group: {
+                                type: "string",
+                                description: "Name of the ransomware group (e.g. lockbit3, blackcat, clop)",
+                            },
+                        },
+                        required: ["group"],
+                    },
+                    outputSchema: MITRE_TTPS_OUTPUT_SCHEMA,
+                    annotations: READ_ONLY_ANNOTATIONS,
+                },
             ],
         }));
         this.server.setRequestHandler("tools/call", async (request) => {
@@ -541,6 +670,30 @@ class RansomwareLiveServer {
                             throw new ProtocolError(ProtocolErrorCode.InvalidParams, "Invalid group name for get_yara_rules");
                         }
                         result = await this.getYaraRules(request.params.arguments.group);
+                        break;
+                    case "get_negotiation_chat":
+                        if (!isValidNegotiationChatArgs(request.params.arguments)) {
+                            throw new ProtocolError(ProtocolErrorCode.InvalidParams, "Invalid arguments for get_negotiation_chat: chatId requires group to also be set");
+                        }
+                        result = await this.getNegotiationChat(request.params.arguments.group, request.params.arguments.chatId);
+                        break;
+                    case "get_ransom_note":
+                        if (!isValidRansomNoteArgs(request.params.arguments)) {
+                            throw new ProtocolError(ProtocolErrorCode.InvalidParams, "Invalid arguments for get_ransom_note: noteName requires group to also be set");
+                        }
+                        result = await this.getRansomNote(request.params.arguments.group, request.params.arguments.noteName);
+                        break;
+                    case "get_iocs":
+                        if (!isValidIocsArgs(request.params.arguments)) {
+                            throw new ProtocolError(ProtocolErrorCode.InvalidParams, "Invalid arguments for get_iocs");
+                        }
+                        result = await this.getIocs(request.params.arguments.group, request.params.arguments.type);
+                        break;
+                    case "get_mitre_ttps":
+                        if (!isValidMitreTtpsArgs(request.params.arguments)) {
+                            throw new ProtocolError(ProtocolErrorCode.InvalidParams, "Invalid group name for get_mitre_ttps");
+                        }
+                        result = await this.getMitreTtps(request.params.arguments.group);
                         break;
                     default:
                         throw new ProtocolError(ProtocolErrorCode.MethodNotFound, `Unknown tool: ${toolName}`);
@@ -752,6 +905,75 @@ class RansomwareLiveServer {
     }
     async getYaraRules(group) {
         const response = await this.axiosInstance.get(`/yara/${encodeURIComponent(group)}`);
+        return {
+            content: [
+                {
+                    type: "text",
+                    text: JSON.stringify(response.data, null, 2),
+                },
+            ],
+            structuredContent: response.data,
+        };
+    }
+    async getNegotiationChat(group, chatId) {
+        const proAxios = this.getProAxios();
+        let endpoint = "/negotiations";
+        if (group && chatId) {
+            endpoint = `/negotiations/${encodeURIComponent(group)}/${encodeURIComponent(chatId)}`;
+        }
+        else if (group) {
+            endpoint = `/negotiations/${encodeURIComponent(group)}`;
+        }
+        const response = await proAxios.get(endpoint);
+        return {
+            content: [
+                {
+                    type: "text",
+                    text: JSON.stringify(response.data, null, 2),
+                },
+            ],
+            structuredContent: response.data,
+        };
+    }
+    async getRansomNote(group, noteName) {
+        const proAxios = this.getProAxios();
+        let endpoint = "/ransomnotes";
+        if (group && noteName) {
+            endpoint = `/ransomnotes/${encodeURIComponent(group)}/${encodeURIComponent(noteName)}`;
+        }
+        else if (group) {
+            endpoint = `/ransomnotes/${encodeURIComponent(group)}`;
+        }
+        const response = await proAxios.get(endpoint);
+        return {
+            content: [
+                {
+                    type: "text",
+                    text: JSON.stringify(response.data, null, 2),
+                },
+            ],
+            structuredContent: response.data,
+        };
+    }
+    async getIocs(group, type) {
+        const proAxios = this.getProAxios();
+        const endpoint = group ? `/iocs/${encodeURIComponent(group)}` : "/iocs";
+        const response = await proAxios.get(endpoint, {
+            params: type ? { type } : undefined,
+        });
+        return {
+            content: [
+                {
+                    type: "text",
+                    text: JSON.stringify(response.data, null, 2),
+                },
+            ],
+            structuredContent: response.data,
+        };
+    }
+    async getMitreTtps(group) {
+        const proAxios = this.getProAxios();
+        const response = await proAxios.get(`/groups/${encodeURIComponent(group)}`);
         return {
             content: [
                 {

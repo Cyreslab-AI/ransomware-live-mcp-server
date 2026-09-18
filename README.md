@@ -20,6 +20,14 @@ A Model Context Protocol (MCP) server that provides real-time ransomware victim 
 - **get_cert_contacts**: Get national CERT contact information for a country
 - **get_yara_rules**: Get YARA rules associated with a ransomware group
 
+### Pro Tier Tools (require `RANSOMWARE_LIVE_API_KEY`)
+These call the [Ransomware.live API PRO](https://api-pro.ransomware.live/) and only work when a Pro API key is configured. See [Pro Tier Setup](#pro-tier-setup-optional) below. If called without a key configured, they return a clear error instead of silently falling back to free-tier data.
+
+- **get_negotiation_chat**: Get leaked ransomware negotiation chat logs (ransom demands, counteroffers, payment outcomes). Tiered: no arguments lists groups with chats available, `group` lists that group's chats, `group` + `chatId` reads the full message thread.
+- **get_ransom_note**: Get ransom note text left by ransomware groups. Tiered: no arguments lists groups with notes on file, `group` lists note identifiers, `group` + `noteName` reads the full note text.
+- **get_iocs**: Get Indicators of Compromise (hashes, IPs, domains, emails, BTC addresses, URLs). No `group` lists which groups have IoCs and of what types; `group` returns that group's actual indicator values; optional `type` filters to one IoC type.
+- **get_mitre_ttps**: Get a ransomware group's MITRE ATT&CK tactics/techniques (TTPs), exploited CVEs, and tooling, as part of its comprehensive Pro-tier intelligence profile.
+
 ### Resources
 - **ransomware://api/info**: Basic information about the Ransomware.live API
 - **ransomware://victims/recent**: Most recently disclosed ransomware victims
@@ -76,6 +84,36 @@ This server uses the **Ransomware.live API v2** which provides:
 - **Authentication**: Free tier available (no API key required)
 - **Base URL**: https://api.ransomware.live/v2
 - **Documentation**: Available at [GitHub](https://github.com/joshhighet/ransomware.live)
+
+## Pro Tier Setup (optional)
+
+The free tier (above) has no authentication and covers victims, groups, cyberattacks, CERT contacts, and YARA rules. The **Pro tier** adds ransomware.live's real differentiators: leaked negotiation chat logs, ransom notes, and IoC/MITRE ATT&CK mapping.
+
+1. Get a free Pro API key at [ransomware.live/my](https://www.ransomware.live/my).
+2. Set it as an environment variable before starting the server:
+   ```bash
+   export RANSOMWARE_LIVE_API_KEY="your-api-key-here"
+   ```
+   Or in your MCP client config:
+   ```json
+   {
+     "mcpServers": {
+       "ransomware-live": {
+         "command": "node",
+         "args": ["/path/to/ransomware-live-server/build/index.js"],
+         "env": {
+           "RANSOMWARE_LIVE_API_KEY": "your-api-key-here"
+         }
+       }
+     }
+   }
+   ```
+3. The four Pro tools (`get_negotiation_chat`, `get_ransom_note`, `get_iocs`, `get_mitre_ttps`) become usable. All other tools are unaffected whether or not a key is set.
+
+**Pro tier details** (from the [live API spec](https://api-pro.ransomware.live/swagger.json)):
+- **Base URL**: `https://api-pro.ransomware.live`
+- **Authentication**: `X-API-KEY` header
+- **Rate limit**: 500,000 requests/month per key
 
 ## Data Types
 
@@ -163,6 +201,28 @@ This server uses the **Ransomware.live API v2** which provides:
   "arguments": {
     "sector": "Healthcare",
     "countryCode": "US"
+  }
+}
+```
+
+### Get a Negotiation Chat (Pro tier)
+```javascript
+// Discover which groups have chats
+{ "tool": "get_negotiation_chat", "arguments": {} }
+
+// List LockBit3's available chats
+{ "tool": "get_negotiation_chat", "arguments": { "group": "lockbit3" } }
+
+// Read a specific chat's full message thread
+{ "tool": "get_negotiation_chat", "arguments": { "group": "lockbit3", "chatId": "20240517" } }
+```
+
+### Get MITRE ATT&CK TTPs for a Group (Pro tier)
+```javascript
+{
+  "tool": "get_mitre_ttps",
+  "arguments": {
+    "group": "blackcat"
   }
 }
 ```
