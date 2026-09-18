@@ -60,6 +60,113 @@ interface ApiInfo {
   endpoints?: string[];
 }
 
+// JSON Schema fragments describing the record shapes the handlers below
+// actually build (mirroring the interfaces above), reused across each
+// tool's `outputSchema` and the `structuredContent` returned alongside text.
+const VICTIM_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    victim: { type: "string" },
+    group: { type: "string" },
+    attackdate: { type: "string" },
+    country: { type: "string" },
+    infostealer: { type: "object" },
+    press: { type: "array", items: { type: "string" } },
+    updates: { type: "array", items: { type: "string" } },
+    website: { type: "string" },
+    sector: { type: "string" },
+    description: { type: "string" },
+    discovered: { type: "string" },
+  },
+  required: ["victim", "group"],
+};
+
+const GROUP_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    name: { type: "string" },
+    description: { type: "string" },
+    locations: { type: "array", items: { type: "string" } },
+    countries: { type: "array", items: { type: "string" } },
+    profile: { type: "array", items: { type: "string" } },
+    captive: { type: "boolean" },
+    parser: { type: "boolean" },
+    javascript_render: { type: "boolean" },
+  },
+  required: ["name"],
+};
+
+const CYBERATTACK_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    victim: { type: "string" },
+    group: { type: "string" },
+    date: { type: "string" },
+    country: { type: "string" },
+    sector: { type: "string" },
+    description: { type: "string" },
+  },
+  required: ["victim", "group"],
+};
+
+const CERT_CONTACT_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    country: { type: "string" },
+    name: { type: "string" },
+    email: { type: "string" },
+    website: { type: "string" },
+    phone: { type: "string" },
+  },
+  required: ["country"],
+};
+
+const API_INFO_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    version: { type: "string" },
+    description: { type: "string" },
+    endpoints: { type: "array", items: { type: "string" } },
+    groups: { type: "number" },
+    victims: { type: "number" },
+  },
+};
+
+// The Ransomware.live YARA endpoint has no fixed response shape in this
+// codebase (the handler passes the raw API payload straight through), so
+// this schema is intentionally unconstrained rather than inventing fields.
+const YARA_RULES_OUTPUT_SCHEMA = {
+  description:
+    "Raw YARA rule data for the ransomware group, as returned by the Ransomware.live API. The exact shape varies by group.",
+};
+
+// Read-only, external-API-lookup annotations shared by every tool in this server.
+const READ_ONLY_ANNOTATIONS = { readOnlyHint: true, openWorldHint: true };
+
+// Mirrors each tool's advertised `outputSchema` (see setupToolHandlers below),
+// keyed by tool name. The tools/call handler passes the matching entry to
+// `server.projectCallToolResult()` so a non-object schema/structuredContent
+// root (e.g. the array-shaped victim/group/attack lists) gets the same
+// wire-safe `{result: ...}` wrapping the SDK already applies when encoding
+// tools/list for older protocol versions.
+const TOOL_OUTPUT_SCHEMAS: Record<string, Record<string, unknown>> = {
+  get_api_info: API_INFO_OUTPUT_SCHEMA,
+  get_recent_victims: { type: "array", items: VICTIM_OUTPUT_SCHEMA },
+  get_group_info: GROUP_OUTPUT_SCHEMA,
+  get_all_groups: { type: "array", items: GROUP_OUTPUT_SCHEMA },
+  get_all_cyberattacks: { type: "array", items: CYBERATTACK_OUTPUT_SCHEMA },
+  get_recent_cyberattacks: { type: "array", items: CYBERATTACK_OUTPUT_SCHEMA },
+  get_group_victims: { type: "array", items: VICTIM_OUTPUT_SCHEMA },
+  search_victims: { type: "array", items: VICTIM_OUTPUT_SCHEMA },
+  get_country_attacks: { type: "array", items: CYBERATTACK_OUTPUT_SCHEMA },
+  get_country_victims: { type: "array", items: VICTIM_OUTPUT_SCHEMA },
+  get_victims_by_date: { type: "array", items: VICTIM_OUTPUT_SCHEMA },
+  get_sector_victims: { type: "array", items: VICTIM_OUTPUT_SCHEMA },
+  get_cert_contacts: CERT_CONTACT_OUTPUT_SCHEMA,
+  get_yara_rules: YARA_RULES_OUTPUT_SCHEMA,
+};
+
 // Validation functions for tool arguments
 const isValidGroupArgs = (args: any): args is { group: string } =>
   typeof args === "object" && args !== null && typeof args.group === "string";
@@ -229,6 +336,8 @@ class RansomwareLiveServer {
             type: "object",
             properties: {},
           },
+          outputSchema: API_INFO_OUTPUT_SCHEMA,
+          annotations: READ_ONLY_ANNOTATIONS,
         },
         {
           name: "get_recent_victims",
@@ -244,6 +353,8 @@ class RansomwareLiveServer {
               },
             },
           },
+          outputSchema: { type: "array", items: VICTIM_OUTPUT_SCHEMA },
+          annotations: READ_ONLY_ANNOTATIONS,
         },
         {
           name: "get_group_info",
@@ -259,6 +370,8 @@ class RansomwareLiveServer {
             },
             required: ["group"],
           },
+          outputSchema: GROUP_OUTPUT_SCHEMA,
+          annotations: READ_ONLY_ANNOTATIONS,
         },
         {
           name: "get_all_groups",
@@ -267,6 +380,8 @@ class RansomwareLiveServer {
             type: "object",
             properties: {},
           },
+          outputSchema: { type: "array", items: GROUP_OUTPUT_SCHEMA },
+          annotations: READ_ONLY_ANNOTATIONS,
         },
         {
           name: "get_all_cyberattacks",
@@ -282,6 +397,8 @@ class RansomwareLiveServer {
               },
             },
           },
+          outputSchema: { type: "array", items: CYBERATTACK_OUTPUT_SCHEMA },
+          annotations: READ_ONLY_ANNOTATIONS,
         },
         {
           name: "get_recent_cyberattacks",
@@ -297,6 +414,8 @@ class RansomwareLiveServer {
               },
             },
           },
+          outputSchema: { type: "array", items: CYBERATTACK_OUTPUT_SCHEMA },
+          annotations: READ_ONLY_ANNOTATIONS,
         },
         {
           name: "get_group_victims",
@@ -311,6 +430,8 @@ class RansomwareLiveServer {
             },
             required: ["group"],
           },
+          outputSchema: { type: "array", items: VICTIM_OUTPUT_SCHEMA },
+          annotations: READ_ONLY_ANNOTATIONS,
         },
         {
           name: "search_victims",
@@ -331,6 +452,8 @@ class RansomwareLiveServer {
             },
             required: ["keyword"],
           },
+          outputSchema: { type: "array", items: VICTIM_OUTPUT_SCHEMA },
+          annotations: READ_ONLY_ANNOTATIONS,
         },
         {
           name: "get_country_attacks",
@@ -347,6 +470,8 @@ class RansomwareLiveServer {
             },
             required: ["countryCode"],
           },
+          outputSchema: { type: "array", items: CYBERATTACK_OUTPUT_SCHEMA },
+          annotations: READ_ONLY_ANNOTATIONS,
         },
         {
           name: "get_country_victims",
@@ -363,6 +488,8 @@ class RansomwareLiveServer {
             },
             required: ["countryCode"],
           },
+          outputSchema: { type: "array", items: VICTIM_OUTPUT_SCHEMA },
+          annotations: READ_ONLY_ANNOTATIONS,
         },
         {
           name: "get_victims_by_date",
@@ -384,6 +511,8 @@ class RansomwareLiveServer {
             },
             required: ["year", "month"],
           },
+          outputSchema: { type: "array", items: VICTIM_OUTPUT_SCHEMA },
+          annotations: READ_ONLY_ANNOTATIONS,
         },
         {
           name: "get_sector_victims",
@@ -404,6 +533,8 @@ class RansomwareLiveServer {
             },
             required: ["sector"],
           },
+          outputSchema: { type: "array", items: VICTIM_OUTPUT_SCHEMA },
+          annotations: READ_ONLY_ANNOTATIONS,
         },
         {
           name: "get_cert_contacts",
@@ -420,6 +551,8 @@ class RansomwareLiveServer {
             },
             required: ["countryCode"],
           },
+          outputSchema: CERT_CONTACT_OUTPUT_SCHEMA,
+          annotations: READ_ONLY_ANNOTATIONS,
         },
         {
           name: "get_yara_rules",
@@ -434,6 +567,8 @@ class RansomwareLiveServer {
             },
             required: ["group"],
           },
+          outputSchema: YARA_RULES_OUTPUT_SCHEMA,
+          annotations: READ_ONLY_ANNOTATIONS,
         },
       ],
     }));
@@ -442,9 +577,13 @@ class RansomwareLiveServer {
       "tools/call",
       async (request): Promise<any> => {
         try {
-          switch (request.params.name) {
+          const toolName = request.params.name;
+          let result: any;
+
+          switch (toolName) {
             case "get_api_info":
-              return await this.getApiInfo();
+              result = await this.getApiInfo();
+              break;
 
             case "get_recent_victims":
               if (!isValidLimitArgs(request.params.arguments)) {
@@ -453,9 +592,10 @@ class RansomwareLiveServer {
                   "Invalid arguments for get_recent_victims",
                 );
               }
-              return await this.getRecentVictims(
+              result = await this.getRecentVictims(
                 request.params.arguments.limit,
               );
+              break;
 
             case "get_group_info":
               if (!isValidGroupArgs(request.params.arguments)) {
@@ -464,10 +604,12 @@ class RansomwareLiveServer {
                   "Invalid group name for get_group_info",
                 );
               }
-              return await this.getGroupInfo(request.params.arguments.group);
+              result = await this.getGroupInfo(request.params.arguments.group);
+              break;
 
             case "get_all_groups":
-              return await this.getAllGroups();
+              result = await this.getAllGroups();
+              break;
 
             case "get_all_cyberattacks":
               if (!isValidLimitArgs(request.params.arguments)) {
@@ -476,9 +618,10 @@ class RansomwareLiveServer {
                   "Invalid arguments for get_all_cyberattacks",
                 );
               }
-              return await this.getAllCyberattacks(
+              result = await this.getAllCyberattacks(
                 request.params.arguments.limit,
               );
+              break;
 
             case "get_recent_cyberattacks":
               if (!isValidLimitArgs(request.params.arguments)) {
@@ -487,9 +630,10 @@ class RansomwareLiveServer {
                   "Invalid arguments for get_recent_cyberattacks",
                 );
               }
-              return await this.getRecentCyberattacks(
+              result = await this.getRecentCyberattacks(
                 request.params.arguments.limit,
               );
+              break;
 
             case "get_group_victims":
               if (!isValidGroupArgs(request.params.arguments)) {
@@ -498,7 +642,10 @@ class RansomwareLiveServer {
                   "Invalid group name for get_group_victims",
                 );
               }
-              return await this.getGroupVictims(request.params.arguments.group);
+              result = await this.getGroupVictims(
+                request.params.arguments.group,
+              );
+              break;
 
             case "search_victims":
               if (!isValidSearchArgs(request.params.arguments)) {
@@ -507,10 +654,11 @@ class RansomwareLiveServer {
                   "Invalid arguments for search_victims",
                 );
               }
-              return await this.searchVictims(
+              result = await this.searchVictims(
                 request.params.arguments.keyword,
                 request.params.arguments.limit,
               );
+              break;
 
             case "get_country_attacks":
               if (!isValidCountryArgs(request.params.arguments)) {
@@ -519,9 +667,10 @@ class RansomwareLiveServer {
                   "Invalid country code for get_country_attacks",
                 );
               }
-              return await this.getCountryAttacks(
+              result = await this.getCountryAttacks(
                 request.params.arguments.countryCode,
               );
+              break;
 
             case "get_country_victims":
               if (!isValidCountryArgs(request.params.arguments)) {
@@ -530,9 +679,10 @@ class RansomwareLiveServer {
                   "Invalid country code for get_country_victims",
                 );
               }
-              return await this.getCountryVictims(
+              result = await this.getCountryVictims(
                 request.params.arguments.countryCode,
               );
+              break;
 
             case "get_victims_by_date":
               if (!isValidDateArgs(request.params.arguments)) {
@@ -541,10 +691,11 @@ class RansomwareLiveServer {
                   "Invalid date arguments for get_victims_by_date",
                 );
               }
-              return await this.getVictimsByDate(
+              result = await this.getVictimsByDate(
                 request.params.arguments.year,
                 request.params.arguments.month,
               );
+              break;
 
             case "get_sector_victims":
               if (!isValidSectorArgs(request.params.arguments)) {
@@ -553,10 +704,11 @@ class RansomwareLiveServer {
                   "Invalid arguments for get_sector_victims",
                 );
               }
-              return await this.getSectorVictims(
+              result = await this.getSectorVictims(
                 request.params.arguments.sector,
                 request.params.arguments.countryCode,
               );
+              break;
 
             case "get_cert_contacts":
               if (!isValidCountryArgs(request.params.arguments)) {
@@ -565,9 +717,10 @@ class RansomwareLiveServer {
                   "Invalid country code for get_cert_contacts",
                 );
               }
-              return await this.getCertContacts(
+              result = await this.getCertContacts(
                 request.params.arguments.countryCode,
               );
+              break;
 
             case "get_yara_rules":
               if (!isValidGroupArgs(request.params.arguments)) {
@@ -576,14 +729,25 @@ class RansomwareLiveServer {
                   "Invalid group name for get_yara_rules",
                 );
               }
-              return await this.getYaraRules(request.params.arguments.group);
+              result = await this.getYaraRules(request.params.arguments.group);
+              break;
 
             default:
               throw new ProtocolError(
                 ProtocolErrorCode.MethodNotFound,
-                `Unknown tool: ${request.params.name}`,
+                `Unknown tool: ${toolName}`,
               );
           }
+
+          // Project the result through the negotiated wire codec so a
+          // non-object `structuredContent` root (e.g. the array-shaped
+          // victim/group/attack lists) is wrapped the same way the SDK
+          // already wraps this tool's advertised outputSchema for older
+          // protocol versions. See SDK docs on `projectCallToolResult`.
+          return this.server.projectCallToolResult(
+            result,
+            TOOL_OUTPUT_SCHEMAS[toolName],
+          );
         } catch (error) {
           if (error instanceof ProtocolError) {
             throw error;
@@ -625,6 +789,7 @@ class RansomwareLiveServer {
           text: JSON.stringify(response.data, null, 2),
         },
       ],
+      structuredContent: response.data,
     };
   }
 
@@ -643,6 +808,7 @@ class RansomwareLiveServer {
           text: JSON.stringify(data, null, 2),
         },
       ],
+      structuredContent: data,
     };
   }
 
@@ -657,6 +823,7 @@ class RansomwareLiveServer {
           text: JSON.stringify(response.data, null, 2),
         },
       ],
+      structuredContent: response.data,
     };
   }
 
@@ -669,6 +836,7 @@ class RansomwareLiveServer {
           text: JSON.stringify(response.data, null, 2),
         },
       ],
+      structuredContent: response.data,
     };
   }
 
@@ -687,6 +855,7 @@ class RansomwareLiveServer {
           text: JSON.stringify(data, null, 2),
         },
       ],
+      structuredContent: data,
     };
   }
 
@@ -705,6 +874,7 @@ class RansomwareLiveServer {
           text: JSON.stringify(data, null, 2),
         },
       ],
+      structuredContent: data,
     };
   }
 
@@ -719,6 +889,7 @@ class RansomwareLiveServer {
           text: JSON.stringify(response.data, null, 2),
         },
       ],
+      structuredContent: response.data,
     };
   }
 
@@ -739,6 +910,7 @@ class RansomwareLiveServer {
           text: JSON.stringify(data, null, 2),
         },
       ],
+      structuredContent: data,
     };
   }
 
@@ -753,6 +925,7 @@ class RansomwareLiveServer {
           text: JSON.stringify(response.data, null, 2),
         },
       ],
+      structuredContent: response.data,
     };
   }
 
@@ -767,6 +940,7 @@ class RansomwareLiveServer {
           text: JSON.stringify(response.data, null, 2),
         },
       ],
+      structuredContent: response.data,
     };
   }
 
@@ -779,6 +953,7 @@ class RansomwareLiveServer {
           text: JSON.stringify(response.data, null, 2),
         },
       ],
+      structuredContent: response.data,
     };
   }
 
@@ -796,6 +971,7 @@ class RansomwareLiveServer {
           text: JSON.stringify(response.data, null, 2),
         },
       ],
+      structuredContent: response.data,
     };
   }
 
@@ -810,6 +986,7 @@ class RansomwareLiveServer {
           text: JSON.stringify(response.data, null, 2),
         },
       ],
+      structuredContent: response.data,
     };
   }
 
@@ -824,6 +1001,7 @@ class RansomwareLiveServer {
           text: JSON.stringify(response.data, null, 2),
         },
       ],
+      structuredContent: response.data,
     };
   }
 
